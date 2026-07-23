@@ -1,0 +1,6 @@
+# pyspark itself is NOT listed here - it ships inside the bitnami/spark base
+# image (see Dockerfile), which guarantees the exact same version as the
+# spark-master/spark-worker cluster this job submits to.
+psycopg2-binary==2.9.9
+PyYAML==6.0.2
+python-dotenv==1.0.1

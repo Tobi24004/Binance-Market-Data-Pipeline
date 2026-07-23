@@ -1,0 +1,39 @@
+# Secrets
+.env
+
+# Runtime state - large, changes constantly, never commit (see docs/plan section 4.2)
+data/checkpoints/
+data/warehouse/
+!data/checkpoints/.gitkeep
+!data/warehouse/.gitkeep
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.mypy_cache/
+*.egg-info/
+.venv/
+venv/
+
+# Spark
+dependencies.zip
+spark-warehouse/
+metastore_db/
+
+# Airflow
+airflow.db
+airflow.cfg
+airflow-webserver.pid
+logs/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+desktop.ini
+.idea/
+.vscode/
+
+# Local tool config - machine/session-specific, not project source
+.claude/

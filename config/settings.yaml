@@ -1,0 +1,48 @@
+# Structural configuration only - no secrets here (this file is committed to git).
+# Secrets (POSTGRES_PASSWORD, etc.) live in .env and are read via environment
+# variables by src/common/config.py.
+
+symbols:
+  - BTCUSDT
+  - ETHUSDT
+  - BNBUSDT
+
+binance:
+  ws_base_url: "wss://stream.binance.com:9443"
+  rest_base_url: "https://api.binance.com"
+  stream_suffix: "trade"
+
+kafka:
+  bootstrap_servers: "broker:29092"
+  topic_trades: "crypto_trades"
+  topic_trades_dlq: "crypto_trades_dlq"
+  # Local (non-docker) override for running the producer straight from a
+  # laptop against `docker-compose up` - see README "Chạy local" section.
+  bootstrap_servers_local: "localhost:9093"
+
+postgres:
+  host: "postgres"
+  port: 5432
+  database: "binance"
+  user: "binance"
+  table_fact_price: "fact_price"
+  table_dim_symbol: "dim_symbol"
+
+spark:
+  app_name: "binance-streaming"
+  master: "spark://spark-master:7077"
+  checkpoint_console: "data/checkpoints/console"
+  checkpoint_valid: "data/checkpoints/valid"
+  checkpoint_dlq: "data/checkpoints/dlq"
+  trigger_interval_seconds: 10
+  starting_offsets: "latest"
+
+producer:
+  reconnect_base_delay_seconds: 1
+  reconnect_max_delay_seconds: 30
+  metrics_log_interval_seconds: 30
+  ping_interval_seconds: 20
+
+dashboard:
+  refresh_interval_seconds: 5
+  default_lookback_minutes: 60

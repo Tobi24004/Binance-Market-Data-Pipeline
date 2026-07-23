@@ -1,0 +1,208 @@
+# See README.md "Huong dan cai dat" for the full bring-up sequence.
+# Airflow here intentionally does NOT touch producer/streaming - it only
+# runs the batch DAGs in dags/ (plan section 2 / 8).
+
+networks:
+  binance-net:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  spark_ivy_cache:
+
+services:
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.6.0
+    container_name: zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    restart: unless-stopped
+    networks:
+      - binance-net
+
+  broker:
+    image: confluentinc/cp-kafka:7.6.0
+    container_name: broker
+    depends_on:
+      - zookeeper
+    ports:
+      - "9093:9093" # host-facing listener, matches config/settings.yaml kafka.bootstrap_servers_local
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://broker:29092,PLAINTEXT_HOST://localhost:9093
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:29092,PLAINTEXT_HOST://0.0.0.0:9093
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+    healthcheck:
+      # Port 9092 isn't listened on at all - KAFKA_LISTENERS above only binds
+      # 29092 (internal PLAINTEXT) and 9093 (PLAINTEXT_HOST). Must match one
+      # of those or this check fails forever and producer/streaming (which
+      # depend_on broker: condition: service_healthy) never start.
+      test: ["CMD", "kafka-broker-api-versions", "--bootstrap-server", "localhost:29092"]
+      interval: 10s
+      timeout: 10s
+      retries: 15
+    restart: unless-stopped
+    networks:
+      - binance-net
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: postgres
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-binance}
+      POSTGRES_USER: ${POSTGRES_USER:-binance}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-binance_dev_password}
+    ports:
+      - "5433:5432" # host 5433 - a native Postgres already owns 5432 on this machine
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./sql:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-binance} -d ${POSTGRES_DB:-binance}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+    networks:
+      - binance-net
+
+  spark-master:
+    image: bitnamilegacy/spark:3.5.1
+    container_name: spark-master
+    environment:
+      SPARK_MODE: master
+      SPARK_RPC_AUTHENTICATION_ENABLED: "no"
+      SPARK_RPC_ENCRYPTION_ENABLED: "no"
+      SPARK_LOCAL_STORAGE_ENCRYPTION_ENABLED: "no"
+      SPARK_SSL_ENABLED: "no"
+    ports:
+      - "7077:7077" # spark-submit / driver registration
+      - "8081:8080" # Spark master web UI
+    restart: unless-stopped
+    networks:
+      - binance-net
+
+  spark-worker:
+    image: bitnamilegacy/spark:3.5.1
+    container_name: spark-worker
+    depends_on:
+      - spark-master
+    environment:
+      SPARK_MODE: worker
+      SPARK_MASTER_URL: spark://spark-master:7077
+      SPARK_WORKER_MEMORY: 2g
+      SPARK_WORKER_CORES: 2
+      SPARK_RPC_AUTHENTICATION_ENABLED: "no"
+      SPARK_RPC_ENCRYPTION_ENABLED: "no"
+      SPARK_LOCAL_STORAGE_ENCRYPTION_ENABLED: "no"
+      SPARK_SSL_ENABLED: "no"
+    ports:
+      - "8082:8081" # Spark worker web UI
+    restart: unless-stopped
+    networks:
+      - binance-net
+
+  producer:
+    build:
+      context: .
+      dockerfile: src/producer/Dockerfile
+    container_name: producer
+    depends_on:
+      broker:
+        condition: service_healthy
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: broker:29092
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    volumes:
+      - ./config:/app/config:ro
+    restart: unless-stopped
+    networks:
+      - binance-net
+
+  streaming:
+    build:
+      context: .
+      dockerfile: src/streaming/Dockerfile
+    container_name: streaming
+    depends_on:
+      broker:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      spark-master:
+        condition: service_started
+      spark-worker:
+        condition: service_started
+    environment:
+      SPARK_MASTER_URL: spark://spark-master:7077
+      KAFKA_BOOTSTRAP_SERVERS: broker:29092
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: ${POSTGRES_DB:-binance}
+      POSTGRES_USER: ${POSTGRES_USER:-binance}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-binance_dev_password}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      # SPARK_DEBUG_CONSOLE=1 also prints parsed rows to the console (Stage 5 debug step)
+      SPARK_DEBUG_CONSOLE: ${SPARK_DEBUG_CONSOLE:-0}
+    volumes:
+      - ./config:/app/config:ro
+      - ./data/checkpoints:/app/data/checkpoints
+      - spark_ivy_cache:/root/.ivy2
+    restart: unless-stopped
+    networks:
+      - binance-net
+
+  dashboard:
+    build:
+      context: .
+      dockerfile: dashboard/Dockerfile
+    container_name: dashboard
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: ${POSTGRES_DB:-binance}
+      POSTGRES_USER: ${POSTGRES_USER:-binance}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-binance_dev_password}
+    ports:
+      - "8501:8501"
+    volumes:
+      - ./config:/app/config:ro
+    restart: unless-stopped
+    networks:
+      - binance-net
+
+  airflow:
+    image: apache/airflow:2.9.3
+    container_name: airflow
+    command: standalone
+    environment:
+      AIRFLOW__CORE__EXECUTOR: SequentialExecutor
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__CORE__DAGS_FOLDER: /opt/airflow/dags
+      _AIRFLOW_WWW_USER_USERNAME: ${AIRFLOW_ADMIN_USER:-admin}
+      _AIRFLOW_WWW_USER_PASSWORD: ${AIRFLOW_ADMIN_PASSWORD:-admin}
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: ${POSTGRES_DB:-binance}
+      POSTGRES_USER: ${POSTGRES_USER:-binance}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-binance_dev_password}
+      KAFKA_BOOTSTRAP_SERVERS: broker:29092
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./dags:/opt/airflow/dags
+      - ./src/common:/opt/airflow/dags/common:ro
+      - ./config:/opt/airflow/config:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - binance-net
